@@ -6185,7 +6185,7 @@ function PlayPageClient() {
           loop: false,
           flip: false,
           playbackRate: true,
-          aspectRatio: false,
+          aspectRatio: true,
           fullscreen: !isIOS,  // iOS 禁用原生全屏按钮，避免触发系统播放器
           fullscreenWeb: true,  // 保留网页全屏按钮（所有平台）
           ...(currentSubtitles.length > 0 ? {
@@ -7375,7 +7375,12 @@ function PlayPageClient() {
           window.addEventListener('resize', updateScreenshotVisibility);
           artPlayerRef.current.on('fullscreen', updateScreenshotVisibility);
           artPlayerRef.current.on('fullscreenWeb', updateScreenshotVisibility);
-
+          artPlayerRef.current.on('aspectRatio', () => {
+          var artvideoel = document.querySelector('.art-video');
+          if (artvideoel) {
+              artvideoel.setAttribute('style', 'width: 100%; height: 100%; margin: 0px auto;');  
+          }
+          }); 
           // iOS 设备：动态调整弹幕设置面板位置，避免被遮挡
           if (isIOS && artPlayerRef.current) {
             // 使用 MutationObserver 监听弹幕设置面板的显示
