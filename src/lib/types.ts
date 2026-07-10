@@ -233,6 +233,42 @@ export interface IStorage {
     userName: string,
     enabled: boolean
   ): Promise<void>;
+  // Web Push订阅相关
+  upsertPushSubscription?(
+    userName: string,
+    subscription: PushSubscriptionRecord
+  ): Promise<void>;
+  getEnabledPushSubscriptions?(userName: string): Promise<PushSubscriptionRecord[]>;
+  deletePushSubscriptionByEndpoint?(
+    userName: string,
+    endpoint: string
+  ): Promise<void>;
+  deletePushSubscriptionsByTokenId?(
+    userName: string,
+    tokenId: string
+  ): Promise<void>;
+  deleteAllPushSubscriptions?(userName: string): Promise<void>;
+  updatePushSubscriptionDeliveryStats?(
+    userName: string,
+    endpoint: string,
+    success: boolean
+  ): Promise<void>;
+
+  // Telegram Bot绑定相关
+  getTelegramBinding?(userName: string): Promise<TelegramBindingRecord | null>;
+  getTelegramBindingByTelegramUserId?(
+    telegramUserId: string
+  ): Promise<TelegramBindingRecord | null>;
+  upsertTelegramBinding?(binding: TelegramBindingRecord): Promise<void>;
+  deleteTelegramBindingByUsername?(userName: string): Promise<void>;
+  deleteTelegramBindingByTelegramUserId?(telegramUserId: string): Promise<void>;
+  getTelegramBindSession?(
+    code: string
+  ): Promise<TelegramBindSessionRecord | null>;
+  upsertTelegramBindSession?(
+    session: TelegramBindSessionRecord
+  ): Promise<void>;
+  markTelegramBindSessionUsed?(code: string): Promise<void>;
 
   // TVBox订阅token相关
   getTvboxSubscribeToken?(userName: string): Promise<string | null>;
@@ -258,7 +294,18 @@ export interface SearchResult {
   vod_remarks?: string; // 视频备注信息（如"全80集"、"更新至25集"等）
   vod_total?: number; // 总集数
   proxyMode?: boolean; // 代理模式：启用后由服务器代理m3u8和ts分片
-  subtitles?: Array<Array<{ label: string; url: string }>>; // 字幕列表（按集数索引）
+  subtitles?: Array<Array<{
+    label: string;
+    url: string;
+    fallbackUrl?: string;
+    fallbackFormat?: string;
+    language?: string;
+    format?: string; // 实际加载格式，如 vtt / ass / ssa
+    sourceFormat?: string; // Emby 返回的原始字幕格式
+    codec?: string;
+    isExternal?: boolean;
+    renderMode?: 'native' | 'jassub';
+  }>>; // 字幕列表（按集数索引）
   tmdb_id?: number; // TMDB ID
   rating?: number; // 评分
   initialEpisodeIndex?: number; // 初始集数索引（用于小雅源从文件点击进入时指定集数）
@@ -312,6 +359,43 @@ export interface EpisodeFilterRule {
 export interface EpisodeFilterConfig {
   rules: EpisodeFilterRule[]; // 过滤规则列表
   reverseMode?: boolean; // 反向模式：开启后仅显示符合规则的集数
+}
+
+
+export interface PushSubscriptionRecord {
+  id: string;
+  username?: string;
+  tokenId?: string | null;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  userAgent?: string | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastSuccessAt?: number | null;
+  lastFailureAt?: number | null;
+  failureCount?: number;
+}
+
+export interface TelegramBindingRecord {
+  username: string;
+  telegramUserId: string;
+  chatId: string;
+  telegramUsername?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  notificationsEnabled: boolean;
+  boundAt: number;
+  updatedAt: number;
+}
+
+export interface TelegramBindSessionRecord {
+  code: string;
+  username: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
 }
 
 // 通知类型枚举

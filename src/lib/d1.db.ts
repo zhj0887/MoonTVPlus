@@ -14,6 +14,7 @@ import {
   DanmakuFilterConfig,
   Notification,
   MovieRequest,
+  PushSubscriptionRecord,
 } from './types';
 import { AdminConfig } from './admin.types';
 import { MangaReadRecord, MangaShelfItem } from './manga.types';
@@ -25,6 +26,7 @@ import {
   MusicV2PlaylistRecord,
 } from './music-v2';
 import { userInfoCache } from './user-cache';
+import { dispatchNotificationChannels } from './notification-dispatch';
 
 /**
  * Cloudflare D1 存储实现
@@ -80,6 +82,7 @@ export class D1Storage implements IStorage {
       }
     }
   }
+
 
   // ==================== 播放记录 ====================
 
@@ -1911,6 +1914,133 @@ export class D1Storage implements IStorage {
     }
   }
 
+
+  async upsertPushSubscription(
+    userName: string,
+    subscription: PushSubscriptionRecord
+  ): Promise<void> {
+    try {
+      const result = await this.db
+        .prepare(`
+          INSERT INTO notification_push_subscriptions (
+            id, username, token_id, endpoint, p256dh, auth, user_agent, enabled,
+            created_at, updated_at, last_success_at, last_failure_at, failure_count
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
+          ON CONFLICT(endpoint) DO UPDATE SET
+            username = excluded.username,
+            token_id = excluded.token_id,
+            p256dh = excluded.p256dh,
+            auth = excluded.auth,
+            user_agent = excluded.user_agent,
+            enabled = 1,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          subscription.id,
+          userName,
+          subscription.tokenId || null,
+          subscription.endpoint,
+          subscription.p256dh,
+          subscription.auth,
+          subscription.userAgent || null,
+          subscription.enabled ? 1 : 0,
+          subscription.createdAt,
+          subscription.updatedAt
+        )
+        .run();
+      if (!result.success) {
+        throw new Error(result.error || '保存浏览器通知订阅失败');
+      }
+    } catch (err) {
+      console.error('D1Storage.upsertPushSubscription error:', err);
+      throw err;
+    }
+  }
+
+  async getEnabledPushSubscriptions(userName: string): Promise<PushSubscriptionRecord[]> {
+    try {
+      const results = await this.db
+        .prepare('SELECT * FROM notification_push_subscriptions WHERE username = ? AND enabled = 1')
+        .bind(userName)
+        .all();
+
+      return (results.results || []).map((row: any) => ({
+        id: row.id as string,
+        username: row.username as string,
+        tokenId: (row.token_id as string | null) || null,
+        endpoint: row.endpoint as string,
+        p256dh: row.p256dh as string,
+        auth: row.auth as string,
+        userAgent: (row.user_agent as string | null) || null,
+        enabled: row.enabled === 1,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        lastSuccessAt: row.last_success_at ? Number(row.last_success_at) : null,
+        lastFailureAt: row.last_failure_at ? Number(row.last_failure_at) : null,
+        failureCount: Number(row.failure_count || 0),
+      }));
+    } catch (err) {
+      console.error('D1Storage.getEnabledPushSubscriptions error:', err);
+      return [];
+    }
+  }
+
+  async deletePushSubscriptionByEndpoint(userName: string, endpoint: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ? AND endpoint = ?')
+        .bind(userName, endpoint)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deletePushSubscriptionByEndpoint error:', err);
+    }
+  }
+
+  async deletePushSubscriptionsByTokenId(userName: string, tokenId: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ? AND token_id = ?')
+        .bind(userName, tokenId)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deletePushSubscriptionsByTokenId error:', err);
+    }
+  }
+
+  async deleteAllPushSubscriptions(userName: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ?')
+        .bind(userName)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteAllPushSubscriptions error:', err);
+    }
+  }
+
+  async updatePushSubscriptionDeliveryStats(
+    userName: string,
+    endpoint: string,
+    success: boolean
+  ): Promise<void> {
+    try {
+      const now = Date.now();
+      if (success) {
+        await this.db
+          .prepare('UPDATE notification_push_subscriptions SET last_success_at = ?, failure_count = 0, updated_at = ? WHERE username = ? AND endpoint = ?')
+          .bind(now, now, userName, endpoint)
+          .run();
+      } else {
+        await this.db
+          .prepare('UPDATE notification_push_subscriptions SET last_failure_at = ?, failure_count = failure_count + 1, updated_at = ? WHERE username = ? AND endpoint = ?')
+          .bind(now, now, userName, endpoint)
+          .run();
+      }
+    } catch (err) {
+      console.error('D1Storage.updatePushSubscriptionDeliveryStats error:', err);
+    }
+  }
+
   // ==================== TVBox订阅token ====================
 
   async getTvboxSubscribeToken?(userName: string): Promise<string | null> {
@@ -2952,6 +3082,8 @@ export class D1Storage implements IStorage {
           notification.metadata ? JSON.stringify(notification.metadata) : null
         )
         .run();
+
+      await dispatchNotificationChannels(this, userName, notification);
     } catch (err) {
       console.error('D1Storage.addNotification error:', err);
       throw err;
@@ -3059,7 +3191,7 @@ export class D1Storage implements IStorage {
             requested_by, request_count, status, created_at, updated_at,
             fulfilled_at, fulfilled_source, fulfilled_id
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
         )
         .bind(
@@ -3339,6 +3471,138 @@ export class D1Storage implements IStorage {
       console.error('D1Storage.deleteGlobalValue error:', err);
       throw err;
     }
+  }
+
+
+  private mapTelegramBinding(row: any): import('./types').TelegramBindingRecord {
+    return {
+      username: row.username as string,
+      telegramUserId: String(row.telegram_user_id),
+      chatId: String(row.chat_id),
+      telegramUsername: (row.telegram_username as string | null) || null,
+      firstName: (row.first_name as string | null) || null,
+      lastName: (row.last_name as string | null) || null,
+      notificationsEnabled: row.notifications_enabled === 1,
+      boundAt: Number(row.bound_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async getTelegramBinding(userName: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE username = ?')
+        .bind(userName)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('D1Storage.getTelegramBinding error:', err);
+      return null;
+    }
+  }
+
+  async getTelegramBindingByTelegramUserId(telegramUserId: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE telegram_user_id = ?')
+        .bind(telegramUserId)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('D1Storage.getTelegramBindingByTelegramUserId error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBinding(binding: import('./types').TelegramBindingRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bindings (
+            username, telegram_user_id, chat_id, telegram_username, first_name, last_name,
+            notifications_enabled, bound_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username) DO UPDATE SET
+            telegram_user_id = excluded.telegram_user_id,
+            chat_id = excluded.chat_id,
+            telegram_username = excluded.telegram_username,
+            first_name = excluded.first_name,
+            last_name = excluded.last_name,
+            notifications_enabled = excluded.notifications_enabled,
+            bound_at = excluded.bound_at,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          binding.username,
+          binding.telegramUserId,
+          binding.chatId,
+          binding.telegramUsername || null,
+          binding.firstName || null,
+          binding.lastName || null,
+          binding.notificationsEnabled ? 1 : 0,
+          binding.boundAt,
+          binding.updatedAt
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.upsertTelegramBinding error:', err);
+      throw err;
+    }
+  }
+
+  async deleteTelegramBindingByUsername(userName: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE username = ?').bind(userName).run();
+  }
+
+  async deleteTelegramBindingByTelegramUserId(telegramUserId: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE telegram_user_id = ?').bind(telegramUserId).run();
+  }
+
+  async getTelegramBindSession(code: string): Promise<import('./types').TelegramBindSessionRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bind_sessions WHERE code = ?')
+        .bind(code)
+        .first();
+      if (!row) return null;
+      return {
+        code: row.code as string,
+        username: row.username as string,
+        createdAt: Number(row.created_at),
+        expiresAt: Number(row.expires_at),
+        used: row.used === 1,
+      };
+    } catch (err) {
+      console.error('D1Storage.getTelegramBindSession error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBindSession(session: import('./types').TelegramBindSessionRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bind_sessions (code, username, created_at, expires_at, used)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(code) DO UPDATE SET
+            username = excluded.username,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at,
+            used = excluded.used
+        `)
+        .bind(session.code, session.username, session.createdAt, session.expiresAt, session.used ? 1 : 0)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.upsertTelegramBindSession error:', err);
+      throw err;
+    }
+  }
+
+  async markTelegramBindSessionUsed(code: string): Promise<void> {
+    await this.db
+      .prepare('UPDATE telegram_bind_sessions SET used = 1 WHERE code = ?')
+      .bind(code)
+      .run();
   }
 
   async getLastFavoriteCheckTime(userName: string): Promise<number> {

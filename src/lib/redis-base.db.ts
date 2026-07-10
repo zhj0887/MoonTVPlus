@@ -1,7 +1,5 @@
 /* eslint-disable no-console, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
-import { createClient, RedisClientType } from 'redis';
-
 import { AdminConfig } from './admin.types';
 import { MangaReadRecord, MangaShelfItem } from './manga.types';
 import { BookReadRecord, BookShelfItem } from './book.types';
@@ -11,8 +9,9 @@ import {
   MusicV2PlaylistRecord,
 } from './music-v2';
 import { RedisAdapter } from './redis-adapter';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { Favorite, IStorage, Notification, PlayRecord, PushSubscriptionRecord, SkipConfig } from './types';
 import { userInfoCache } from './user-cache';
+import { dispatchNotificationChannels } from './notification-dispatch';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -28,141 +27,6 @@ function ensureStringArray(value: any[]): string[] {
 
 // 内存锁：用于防止同一用户的并发播放记录操作（迁移、清理等）
 const playRecordLocks = new Map<string, Promise<void>>();
-
-// 连接配置接口
-export interface RedisConnectionConfig {
-  url: string;
-  clientName: string; // 用于日志显示，如 "Redis" 或 "Pika"
-}
-
-// 添加Redis操作重试包装器
-export function createRetryWrapper(
-  clientName: string,
-  getClient: () => RedisClientType
-) {
-  return async function withRetry<T>(
-    operation: () => Promise<T>,
-    maxRetries = 3
-  ): Promise<T> {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        return await operation();
-      } catch (err: any) {
-        const isLastAttempt = i === maxRetries - 1;
-        const isConnectionError =
-          err.message?.includes('Connection') ||
-          err.message?.includes('ECONNREFUSED') ||
-          err.message?.includes('ENOTFOUND') ||
-          err.code === 'ECONNRESET' ||
-          err.code === 'EPIPE';
-
-        if (isConnectionError && !isLastAttempt) {
-          console.log(
-            `${clientName} operation failed, retrying... (${
-              i + 1
-            }/${maxRetries})`
-          );
-          console.error('Error:', err.message);
-
-          // 等待一段时间后重试
-          await new Promise((resolve) => setTimeout(resolve, 1000 * (i + 1)));
-
-          // 尝试重新连接
-          try {
-            const client = getClient();
-            if (!client.isOpen) {
-              await client.connect();
-            }
-          } catch (reconnectErr) {
-            console.error('Failed to reconnect:', reconnectErr);
-          }
-
-          continue;
-        }
-
-        throw err;
-      }
-    }
-
-    throw new Error('Max retries exceeded');
-  };
-}
-
-// 创建客户端的工厂函数
-export function createRedisClient(
-  config: RedisConnectionConfig,
-  globalSymbol: symbol
-): RedisClientType {
-  let client: RedisClientType | undefined = (global as any)[globalSymbol];
-
-  if (!client) {
-    if (!config.url) {
-      throw new Error(`${config.clientName}_URL env variable not set`);
-    }
-
-    // 创建客户端配置
-    const clientConfig: any = {
-      url: config.url,
-      socket: {
-        // 重连策略：指数退避，最大30秒
-        reconnectStrategy: (retries: number) => {
-          console.log(
-            `${config.clientName} reconnection attempt ${retries + 1}`
-          );
-          if (retries > 10) {
-            console.error(
-              `${config.clientName} max reconnection attempts exceeded`
-            );
-            return false; // 停止重连
-          }
-          return Math.min(1000 * Math.pow(2, retries), 30000); // 指数退避，最大30秒
-        },
-        connectTimeout: 10000, // 10秒连接超时
-        // 设置no delay，减少延迟
-        noDelay: true,
-      },
-      // 添加其他配置
-      pingInterval: 30000, // 30秒ping一次，保持连接活跃
-    };
-
-    client = createClient(clientConfig);
-
-    // 添加错误事件监听
-    client.on('error', (err) => {
-      console.error(`${config.clientName} client error:`, err);
-    });
-
-    client.on('connect', () => {
-      console.log(`${config.clientName} connected`);
-    });
-
-    client.on('reconnecting', () => {
-      console.log(`${config.clientName} reconnecting...`);
-    });
-
-    client.on('ready', () => {
-      console.log(`${config.clientName} ready`);
-    });
-
-    // 初始连接，带重试机制
-    const connectWithRetry = async () => {
-      try {
-        await client!.connect();
-        console.log(`${config.clientName} connected successfully`);
-      } catch (err) {
-        console.error(`${config.clientName} initial connection failed:`, err);
-        console.log('Will retry in 5 seconds...');
-        setTimeout(connectWithRetry, 5000);
-      }
-    };
-
-    connectWithRetry();
-
-    (global as any)[globalSymbol] = client;
-  }
-
-  return client;
-}
 
 // 抽象基类，包含所有通用的Redis操作逻辑
 export abstract class BaseRedisStorage implements IStorage {
@@ -2234,6 +2098,65 @@ export abstract class BaseRedisStorage implements IStorage {
     await this.withRetry(() => this.adapter.del(this.globalValueKey(key)));
   }
 
+
+  private telegramBindingKey(userName: string) {
+    return `telegram:binding:user:${userName}`;
+  }
+
+  private telegramUserBindingKey(telegramUserId: string) {
+    return `telegram:binding:tg:${telegramUserId}`;
+  }
+
+  private telegramBindSessionKey(code: string) {
+    return `telegram:bind:${code}`;
+  }
+
+  async getTelegramBinding(userName: string): Promise<import('./types').TelegramBindingRecord | null> {
+    const raw = await this.withRetry(() => this.adapter.get(this.telegramBindingKey(userName)));
+    return raw ? (JSON.parse(ensureString(raw)) as import('./types').TelegramBindingRecord) : null;
+  }
+
+  async getTelegramBindingByTelegramUserId(telegramUserId: string): Promise<import('./types').TelegramBindingRecord | null> {
+    const userName = await this.withRetry(() => this.adapter.get(this.telegramUserBindingKey(telegramUserId)));
+    return userName ? this.getTelegramBinding(ensureString(userName)) : null;
+  }
+
+  async upsertTelegramBinding(binding: import('./types').TelegramBindingRecord): Promise<void> {
+    await this.withRetry(() => this.adapter.set(this.telegramBindingKey(binding.username), JSON.stringify(binding)));
+    await this.withRetry(() => this.adapter.set(this.telegramUserBindingKey(binding.telegramUserId), binding.username));
+  }
+
+  async deleteTelegramBindingByUsername(userName: string): Promise<void> {
+    const binding = await this.getTelegramBinding(userName);
+    await this.withRetry(() => this.adapter.del(this.telegramBindingKey(userName)));
+    if (binding) {
+      await this.withRetry(() => this.adapter.del(this.telegramUserBindingKey(binding.telegramUserId)));
+    }
+  }
+
+  async deleteTelegramBindingByTelegramUserId(telegramUserId: string): Promise<void> {
+    const binding = await this.getTelegramBindingByTelegramUserId(telegramUserId);
+    if (binding) {
+      await this.withRetry(() => this.adapter.del(this.telegramBindingKey(binding.username)));
+    }
+    await this.withRetry(() => this.adapter.del(this.telegramUserBindingKey(telegramUserId)));
+  }
+
+  async getTelegramBindSession(code: string): Promise<import('./types').TelegramBindSessionRecord | null> {
+    const raw = await this.withRetry(() => this.adapter.get(this.telegramBindSessionKey(code)));
+    return raw ? (JSON.parse(ensureString(raw)) as import('./types').TelegramBindSessionRecord) : null;
+  }
+
+  async upsertTelegramBindSession(session: import('./types').TelegramBindSessionRecord): Promise<void> {
+    await this.withRetry(() => this.adapter.set(this.telegramBindSessionKey(session.code), JSON.stringify(session)));
+  }
+
+  async markTelegramBindSessionUsed(code: string): Promise<void> {
+    const session = await this.getTelegramBindSession(code);
+    if (!session) return;
+    await this.upsertTelegramBindSession({ ...session, used: true });
+  }
+
   // ---------- 通知相关 ----------
   private notificationsKey(userName: string) {
     return `u:${userName}:notifications`;
@@ -2268,6 +2191,8 @@ export abstract class BaseRedisStorage implements IStorage {
         JSON.stringify(notifications)
       )
     );
+
+    await dispatchNotificationChannels(this, userName, notification);
   }
 
   async markNotificationAsRead(
@@ -2463,6 +2388,106 @@ export abstract class BaseRedisStorage implements IStorage {
     );
     // 清除缓存
     userInfoCache?.delete(userName);
+  }
+
+
+  private pushSubscriptionsKey(userName: string): string {
+    return `u:${userName}:push_subscriptions`;
+  }
+
+  async upsertPushSubscription(
+    userName: string,
+    subscription: PushSubscriptionRecord
+  ): Promise<void> {
+    await this.withRetry(() =>
+      this.adapter.hSet(
+        this.pushSubscriptionsKey(userName),
+        subscription.id,
+        JSON.stringify({ ...subscription, username: userName, updatedAt: Date.now() })
+      )
+    );
+  }
+
+  async getEnabledPushSubscriptions(userName: string): Promise<PushSubscriptionRecord[]> {
+    const all = await this.withRetry(() =>
+      this.adapter.hGetAll(this.pushSubscriptionsKey(userName))
+    );
+    if (!all || typeof all !== 'object') return [];
+
+    return Object.values(all)
+      .map((raw) => {
+        try {
+          return JSON.parse(raw as string) as PushSubscriptionRecord;
+        } catch {
+          return null;
+        }
+      })
+      .filter((item): item is PushSubscriptionRecord => Boolean(item?.enabled));
+  }
+
+  async deletePushSubscriptionByEndpoint(userName: string, endpoint: string): Promise<void> {
+    const subscriptions = await this.getEnabledPushSubscriptions(userName);
+    const target = subscriptions.find((item) => item.endpoint === endpoint);
+    if (!target) return;
+    await this.withRetry(() =>
+      this.adapter.hDel(this.pushSubscriptionsKey(userName), target.id)
+    );
+  }
+
+  async deletePushSubscriptionsByTokenId(userName: string, tokenId: string): Promise<void> {
+    const all = await this.withRetry(() =>
+      this.adapter.hGetAll(this.pushSubscriptionsKey(userName))
+    );
+    if (!all || typeof all !== 'object') return;
+
+    for (const [id, raw] of Object.entries(all)) {
+      try {
+        const subscription = JSON.parse(raw as string) as PushSubscriptionRecord;
+        if (subscription.tokenId === tokenId) {
+          await this.withRetry(() =>
+            this.adapter.hDel(this.pushSubscriptionsKey(userName), id)
+          );
+        }
+      } catch {
+        // ignore malformed record
+      }
+    }
+  }
+
+  async deleteAllPushSubscriptions(userName: string): Promise<void> {
+    await this.withRetry(() => this.adapter.del(this.pushSubscriptionsKey(userName)));
+  }
+
+  async updatePushSubscriptionDeliveryStats(
+    userName: string,
+    endpoint: string,
+    success: boolean
+  ): Promise<void> {
+    const all = await this.withRetry(() =>
+      this.adapter.hGetAll(this.pushSubscriptionsKey(userName))
+    );
+    if (!all || typeof all !== 'object') return;
+
+    for (const [id, raw] of Object.entries(all)) {
+      try {
+        const subscription = JSON.parse(raw as string) as PushSubscriptionRecord;
+        if (subscription.endpoint !== endpoint) continue;
+        const now = Date.now();
+        const next = {
+          ...subscription,
+          updatedAt: now,
+          lastSuccessAt: success ? now : subscription.lastSuccessAt || null,
+          lastFailureAt: success ? subscription.lastFailureAt || null : now,
+          failureCount: success ? 0 : (subscription.failureCount || 0) + 1,
+        };
+        await this.withRetry(() =>
+          this.adapter.hSet(this.pushSubscriptionsKey(userName), id, JSON.stringify(next))
+        );
+        return;
+      } catch {
+        // ignore malformed record
+      }
+    }
   }
 
   // ---------- TVBox订阅token相关 ----------

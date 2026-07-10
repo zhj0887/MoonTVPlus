@@ -47,6 +47,8 @@ interface ConfigFileStruct {
   lives?: {
     [key: string]: LiveCfg;
   };
+  special_source_apis?: string[];
+  specialSourceApis?: string[];
 }
 
 export const API_CONFIG = {
@@ -119,6 +121,18 @@ export function refineConfig(adminConfig: AdminConfig): AdminConfig {
 
   // 将 Map 转换回数组
   adminConfig.SourceConfig = Array.from(currentApiSites.values());
+
+  const specialApisFromFile = Array.isArray(fileConfig.special_source_apis)
+    ? fileConfig.special_source_apis
+    : Array.isArray(fileConfig.specialSourceApis)
+    ? fileConfig.specialSourceApis
+    : undefined;
+  if (specialApisFromFile) {
+    const sourceKeys = new Set(adminConfig.SourceConfig.map((source) => source.key));
+    adminConfig.SpecialSourceApis = Array.from(new Set(specialApisFromFile)).filter((key) =>
+      sourceKeys.has(key)
+    );
+  }
 
   // 覆盖 CustomCategories
   const customCategoriesFromFile = fileConfig.custom_category || [];
@@ -251,6 +265,10 @@ async function getInitConfig(
       Announcement:
         process.env.ANNOUNCEMENT ||
         '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
+      AnnouncementDisplayMode:
+        process.env.ANNOUNCEMENT_DISPLAY_MODE === 'every'
+          ? 'every'
+          : 'once',
       SearchDownstreamMaxPage:
         Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
       SiteInterfaceCacheTime: cfgFile.cache_time || 7200,
@@ -299,6 +317,7 @@ async function getInitConfig(
       MagnetMikanReverseProxy: '',
       MagnetDmhyReverseProxy: '',
       MagnetAcgripReverseProxy: '',
+      MagnetNyaaReverseProxy: '',
       // 评论功能开关
       EnableComments: false,
       EnableRegistration: false,
@@ -316,6 +335,24 @@ async function getInitConfig(
     SourceConfig: [],
     CustomCategories: [],
     LiveConfig: [],
+    TelegramConfig: {
+      enabled: process.env.TELEGRAM_BOT_ENABLED === 'true' || Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      botUsername: process.env.TELEGRAM_BOT_USERNAME || '',
+      webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+      apiProxy: process.env.TELEGRAM_API_PROXY || '',
+      apiBaseUrl: process.env.TELEGRAM_API_BASE_URL || '',
+      loginEnabled: process.env.TELEGRAM_LOGIN_ENABLED !== 'false',
+      bindingEnabled: process.env.TELEGRAM_BINDING_ENABLED !== 'false',
+      registrationEnabled: process.env.TELEGRAM_REGISTRATION_ENABLED === 'true',
+      notificationsEnabled: process.env.TELEGRAM_NOTIFICATIONS_ENABLED !== 'false',
+      defaultNotifications: process.env.TELEGRAM_DEFAULT_NOTIFICATIONS !== 'false',
+    },
+    SpecialSourceApis: Array.isArray(cfgFile.special_source_apis)
+      ? cfgFile.special_source_apis
+      : Array.isArray(cfgFile.specialSourceApis)
+      ? cfgFile.specialSourceApis
+      : [],
   };
 
   // 用户信息已迁移到新版数据库，不再填充 UserConfig.Users
@@ -490,6 +527,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       MagnetMikanReverseProxy: '',
       MagnetDmhyReverseProxy: '',
       MagnetAcgripReverseProxy: '',
+      MagnetNyaaReverseProxy: '',
       EnableComments: false,
       EnableRegistration: false,
       RequireRegistrationInviteCode: false,
@@ -521,6 +559,11 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   if (adminConfig.SiteConfig.EnableComments === undefined) {
     adminConfig.SiteConfig.EnableComments = false;
   }
+  // 确保公告显示模式存在
+  if (adminConfig.SiteConfig.AnnouncementDisplayMode === undefined) {
+    adminConfig.SiteConfig.AnnouncementDisplayMode =
+      process.env.ANNOUNCEMENT_DISPLAY_MODE === 'every' ? 'every' : 'once';
+  }
   if (adminConfig.SiteConfig.EnableRegistration === undefined) {
     adminConfig.SiteConfig.EnableRegistration = false;
   }
@@ -545,6 +588,25 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   if (adminConfig.SiteConfig.DefaultUserTags === undefined) {
     adminConfig.SiteConfig.DefaultUserTags = [];
   }
+  if (!adminConfig.TelegramConfig) {
+    adminConfig.TelegramConfig = {
+      enabled: process.env.TELEGRAM_BOT_ENABLED === 'true' || Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      botUsername: process.env.TELEGRAM_BOT_USERNAME || '',
+      webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+      apiProxy: process.env.TELEGRAM_API_PROXY || '',
+      apiBaseUrl: process.env.TELEGRAM_API_BASE_URL || '',
+      loginEnabled: process.env.TELEGRAM_LOGIN_ENABLED !== 'false',
+      bindingEnabled: process.env.TELEGRAM_BINDING_ENABLED !== 'false',
+      registrationEnabled: process.env.TELEGRAM_REGISTRATION_ENABLED === 'true',
+      notificationsEnabled: process.env.TELEGRAM_NOTIFICATIONS_ENABLED !== 'false',
+      defaultNotifications: process.env.TELEGRAM_DEFAULT_NOTIFICATIONS !== 'false',
+    };
+  }
+  if (adminConfig.TelegramConfig.registrationEnabled === undefined) {
+    adminConfig.TelegramConfig.registrationEnabled =
+      process.env.TELEGRAM_REGISTRATION_ENABLED === 'true';
+  }
   if (adminConfig.SiteConfig.PansouKeywordBlocklist === undefined) {
     adminConfig.SiteConfig.PansouKeywordBlocklist = '';
   }
@@ -559,6 +621,9 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   }
   if (adminConfig.SiteConfig.MagnetAcgripReverseProxy === undefined) {
     adminConfig.SiteConfig.MagnetAcgripReverseProxy = '';
+  }
+  if (adminConfig.SiteConfig.MagnetNyaaReverseProxy === undefined) {
+    adminConfig.SiteConfig.MagnetNyaaReverseProxy = '';
   }
   if (!adminConfig.UserConfig) {
     adminConfig.UserConfig = { Users: [] };
@@ -580,6 +645,12 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   }
   if (!adminConfig.LiveConfig || !Array.isArray(adminConfig.LiveConfig)) {
     adminConfig.LiveConfig = [];
+  }
+  if (
+    !adminConfig.SpecialSourceApis ||
+    !Array.isArray(adminConfig.SpecialSourceApis)
+  ) {
+    adminConfig.SpecialSourceApis = [];
   }
   adminConfig.LiveRefreshIntervalHours = normalizeLiveRefreshIntervalHours(
     adminConfig.LiveRefreshIntervalHours
@@ -631,6 +702,11 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
     return true;
   });
 
+  const validSourceKeys = new Set(adminConfig.SourceConfig.map((source) => source.key));
+  adminConfig.SpecialSourceApis = Array.from(
+    new Set((adminConfig.SpecialSourceApis || []).filter((key) => validSourceKeys.has(key)))
+  );
+
   // 自定义分类去重
   const seenCustomCategoryKeys = new Set<string>();
   adminConfig.CustomCategories = adminConfig.CustomCategories.filter(
@@ -672,6 +748,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
             UserId: oldConfig.UserId,
             AuthToken: oldConfig.AuthToken,
             Libraries: oldConfig.Libraries,
+            embyAuthorizationHeader: oldConfig.embyAuthorizationHeader,
             LastSyncTime: oldConfig.LastSyncTime,
             ItemCount: oldConfig.ItemCount,
             isDefault: true,
@@ -963,9 +1040,19 @@ export async function getCacheTime(): Promise<number> {
   return config.SiteConfig.SiteInterfaceCacheTime || 7200;
 }
 
-export async function getAvailableApiSites(user?: string): Promise<ApiSite[]> {
+export async function getAvailableApiSites(
+  user?: string,
+  includeSpecialSources = false
+): Promise<ApiSite[]> {
   const config = await getConfig();
-  const allApiSites = config.SourceConfig.filter((s) => !s.disabled);
+  const specialSourceSet = new Set(config.SpecialSourceApis || []);
+  const filterSpecialSources = <T extends { key: string }>(sites: T[]): T[] =>
+    includeSpecialSources
+      ? sites
+      : sites.filter((site) => !specialSourceSet.has(site.key));
+  const allApiSites = filterSpecialSources(
+    config.SourceConfig.filter((s) => !s.disabled)
+  );
 
   if (!user) {
     return allApiSites;
