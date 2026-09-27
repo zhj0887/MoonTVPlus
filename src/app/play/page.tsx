@@ -7682,7 +7682,7 @@ function PlayPageClient() {
           flip: true,
           // 观影室房员隐藏倍速设置，由房主同步控制
           playbackRate: !playSync.shouldDisableControls,
-          aspectRatio: false,
+          aspectRatio: true,
           fullscreen: !isIOS,  // iOS 禁用原生全屏按钮，避免触发系统播放器
           fullscreenWeb: true,  // 保留网页全屏按钮（所有平台）
           ...(shouldUseNativeInitialSubtitle ? {
@@ -9023,6 +9023,13 @@ function PlayPageClient() {
           window.addEventListener('resize', updateScreenshotVisibility);
           artPlayerRef.current.on('fullscreen', updateScreenshotVisibility);
           artPlayerRef.current.on('fullscreenWeb', updateScreenshotVisibility);
+
+          artPlayerRef.current.on('aspectRatio', () => {
+          var artvideoel = document.querySelector('.art-video');
+          if (artvideoel) {
+            artvideoel.setAttribute('style', 'width: 100%; height: 100%; margin: 0px auto;');  
+          }
+          });        
 
           // iOS 设备：动态调整弹幕设置面板位置，避免被遮挡
           if (isIOS && artPlayerRef.current) {
